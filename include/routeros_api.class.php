@@ -1,31 +1,44 @@
 <?php
 /*****************************
  *
- * RouterOS PHP API class v1.5
+ * RouterOS PHP API class v1.6
  * Author: Denis Basta
  * Contributors:
  *    Nick Barnes
  *    Ben Menking (ben [at] infotechsc [dot] com)
  *    Jeremy Jefferson (http://jeremyj.com)
  *    Cristian Deluxe (djcristiandeluxe [at] gmail [dot] com)
+ *    Mikhail Moskalev (mmv.rus [at] gmail [dot] com)
  *
  * http://www.mikrotik.com
  * http://wiki.mikrotik.com/wiki/API_PHP_class
  *
  ******************************/
 
-class routeros_api
-{
-    var $debug = false;      // Show debug information
-    var $error_no;           // Variable for storing connection error number, if any
-    var $error_str;          // Variable for storing connection error text, if any
-    var $attempts = 1;       // Connection attempt count
-    var $connected = false;  // Connection state
-    var $delay = 1;          // Delay between connection attempts in seconds
-    var $port = 8728;        // Port to connect to
-    var $timeout = 1;        // Connection attempt timeout and data read timeout
-    var $socket;             // Variable for storing socket resource
-    
+class Routeros_API {
+    var $debug     = false; //  Show debug information
+    var $connected = false; //  Connection state
+    var $port      = 8728;  //  Port to connect to (default 8729 for ssl)
+    var $ssl       = false; //  Connect using SSL (must enable api-ssl in IP/Services)
+    var $timeout   = 3;     //  Connection attempt timeout and data read timeout
+    var $attempts  = 5;     //  Connection attempt count
+    var $delay     = 3;     //  Delay between connection attempts in seconds
+
+    var $socket;            //  Variable for storing socket resource
+    var $error_no;          //  Variable for storing connection error number, if any
+    var $error_str;         //  Variable for storing connection error text, if any
+
+    /* Check, can be var used in foreach  */
+    public function isIterable($var)
+    {
+        return $var !== null
+                && (is_array($var)
+                || $var instanceof Traversable
+                || $var instanceof Iterator
+                || $var instanceof IteratorAggregate
+                );
+    }
+
     /**
      * Print text for debug purposes
      *
@@ -33,39 +46,42 @@ class routeros_api
      *
      * @return void
      */
-    function debug($text)
+    public function debug($text)
     {
-        if ($this->debug)
+        if ($this->debug) {
             echo $text . "\n";
+        }
     }
-	
-	
+
+
     /**
-     * 
+     *
      *
      * @param string        $length
      *
      * @return void
      */
-    function encode_length($length)
+    public function encodeLength($length)
     {
         if ($length < 0x80) {
             $length = chr($length);
-        } else if ($length < 0x4000) {
+        } elseif ($length < 0x4000) {
             $length |= 0x8000;
             $length = chr(($length >> 8) & 0xFF) . chr($length & 0xFF);
-        } else if ($length < 0x200000) {
+        } elseif ($length < 0x200000) {
             $length |= 0xC00000;
             $length = chr(($length >> 16) & 0xFF) . chr(($length >> 8) & 0xFF) . chr($length & 0xFF);
-        } else if ($length < 0x10000000) {
+        } elseif ($length < 0x10000000) {
             $length |= 0xE0000000;
             $length = chr(($length >> 24) & 0xFF) . chr(($length >> 16) & 0xFF) . chr(($length >> 8) & 0xFF) . chr($length & 0xFF);
-        } else if ($length >= 0x10000000)
+        } elseif ($length >= 0x10000000) {
             $length = chr(0xF0) . chr(($length >> 24) & 0xFF) . chr(($length >> 16) & 0xFF) . chr(($length >> 8) & 0xFF) . chr($length & 0xFF);
+        }
+
         return $length;
     }
-	
-	
+
+
     /**
      * Login to RouterOS
      *
@@ -75,27 +91,40 @@ class routeros_api
      *
      * @return boolean                If we are connected or not
      */
-    function connect($ip, $login, $password)
+    public function connect($ip, $login, $password)
     {
         for ($ATTEMPT = 1; $ATTEMPT <= $this->attempts; $ATTEMPT++) {
             $this->connected = false;
-            $this->debug('Connection attempt #' . $ATTEMPT . ' to ' . $ip . ':' . $this->port . '...');
-            $this->socket = @fsockopen($ip, $this->port, $this->error_no, $this->error_str, $this->timeout);
+            $PROTOCOL = ($this->ssl ? 'ssl://' : '' );
+            $context = stream_context_create(array('ssl' => array('ciphers' => 'ADH:ALL', 'verify_peer' => false, 'verify_peer_name' => false)));
+            $this->debug('Connection attempt #' . $ATTEMPT . ' to ' . $PROTOCOL . $ip . ':' . $this->port . '...');
+            $this->socket = @stream_socket_client($PROTOCOL . $ip.':'. $this->port, $this->error_no, $this->error_str, $this->timeout, STREAM_CLIENT_CONNECT,$context);
             if ($this->socket) {
                 socket_set_timeout($this->socket, $this->timeout);
-                $this->write('/login');
+                $this->write('/login', false);
+                $this->write('=name=' . $login, false);
+                $this->write('=password=' . $password);
                 $RESPONSE = $this->read(false);
-                if ($RESPONSE[0] == '!done') {
-                    $MATCHES = array();
-                    if (preg_match_all('/[^=]+/i', $RESPONSE[1], $MATCHES)) {
-                        if ($MATCHES[0][0] == 'ret' && strlen($MATCHES[0][1]) == 32) {
-                            $this->write('/login', false);
-                            $this->write('=name=' . $login, false);
-                            $this->write('=response=00' . md5(chr(0) . $password . pack('H*', $MATCHES[0][1])));
-                            $RESPONSE = $this->read(false);
-                            if ($RESPONSE[0] == '!done') {
-                                $this->connected = true;
-                                break;
+                if (isset($RESPONSE[0])) {
+                    if ($RESPONSE[0] == '!done') {
+                        if (!isset($RESPONSE[1])) {
+                            // Login method post-v6.43
+                            $this->connected = true;
+                            break;
+                        } else {
+                            // Login method pre-v6.43
+                            $MATCHES = array();
+                            if (preg_match_all('/[^=]+/i', $RESPONSE[1], $MATCHES)) {
+                                if ($MATCHES[0][0] == 'ret' && strlen($MATCHES[0][1]) == 32) {
+                                    $this->write('/login', false);
+                                    $this->write('=name=' . $login, false);
+                                    $this->write('=response=00' . md5(chr(0) . $password . pack('H*', $MATCHES[0][1])));
+                                    $RESPONSE = $this->read(false);
+                                    if (isset($RESPONSE[0]) && $RESPONSE[0] == '!done') {
+                                        $this->connected = true;
+                                        break;
+                                    }
+                                }
                             }
                         }
                     }
@@ -104,28 +133,32 @@ class routeros_api
             }
             sleep($this->delay);
         }
-        if ($this->connected){
-            $this->debug('Connected...');			
-        }else{
-            $this->debug('Error...');			
+
+        if ($this->connected) {
+            $this->debug('Connected...');
+        } else {
+            $this->debug('Error...');
         }
         return $this->connected;
     }
-	
-	
+
+
     /**
      * Disconnect from RouterOS
      *
      * @return void
      */
-    function disconnect()
+    public function disconnect()
     {
-        fclose($this->socket);
+        // let's make sure this socket is still valid.  it may have been closed by something else
+        if( is_resource($this->socket) ) {
+            fclose($this->socket);
+        }
         $this->connected = false;
         $this->debug('Disconnected...');
     }
-	
-	
+
+
     /**
      * Parse response from Router OS
      *
@@ -133,41 +166,41 @@ class routeros_api
      *
      * @return array                  Array with parsed data
      */
-    function parse_response($response)
+    public function parseResponse($response)
     {
         if (is_array($response)) {
             $PARSED      = array();
             $CURRENT     = null;
             $singlevalue = null;
             foreach ($response as $x) {
-                if (in_array($x, array(
-                    '!fatal',
-                    '!re',
-                    '!trap'
-                ))) {
+                if (in_array($x, array('!fatal','!re','!trap'))) {
                     if ($x == '!re') {
                         $CURRENT =& $PARSED[];
-                    } else
+                    } else {
                         $CURRENT =& $PARSED[$x][];
-                } else if ($x != '!done') {
+                    }
+                } elseif ($x != '!done') {
                     $MATCHES = array();
                     if (preg_match_all('/[^=]+/i', $x, $MATCHES)) {
                         if ($MATCHES[0][0] == 'ret') {
                             $singlevalue = $MATCHES[0][1];
                         }
-						$CURRENT[$MATCHES[0][0]] = (isset($MATCHES[0][1]) ? $MATCHES[0][1] : '');
-					}
+                        $CURRENT[$MATCHES[0][0]] = (isset($MATCHES[0][1]) ? $MATCHES[0][1] : '');
+                    }
                 }
             }
+
             if (empty($PARSED) && !is_null($singlevalue)) {
                 $PARSED = $singlevalue;
             }
+
             return $PARSED;
-        } else
+        } else {
             return array();
+        }
     }
-	
-	
+
+
     /**
      * Parse response from Router OS
      *
@@ -175,34 +208,31 @@ class routeros_api
      *
      * @return array                  Array with parsed data
      */
-    function parse_response4smarty($response)
+    public function parseResponse4Smarty($response)
     {
         if (is_array($response)) {
-            $PARSED  = array();
-            $CURRENT = null;
+            $PARSED      = array();
+            $CURRENT     = null;
             $singlevalue = null;
             foreach ($response as $x) {
-                if (in_array($x, array(
-                    '!fatal',
-                    '!re',
-                    '!trap'
-                ))) {
-                    if ($x == '!re')
+                if (in_array($x, array('!fatal','!re','!trap'))) {
+                    if ($x == '!re') {
                         $CURRENT =& $PARSED[];
-                    else
+                    } else {
                         $CURRENT =& $PARSED[$x][];
-                } else if ($x != '!done') {
+                    }
+                } elseif ($x != '!done') {
                     $MATCHES = array();
                     if (preg_match_all('/[^=]+/i', $x, $MATCHES)) {
                         if ($MATCHES[0][0] == 'ret') {
                             $singlevalue = $MATCHES[0][1];
                         }
                         $CURRENT[$MATCHES[0][0]] = (isset($MATCHES[0][1]) ? $MATCHES[0][1] : '');
-					}
+                    }
                 }
             }
             foreach ($PARSED as $key => $value) {
-                $PARSED[$key] = $this->array_change_key_name($value);
+                $PARSED[$key] = $this->arrayChangeKeyName($value);
             }
             return $PARSED;
             if (empty($PARSED) && !is_null($singlevalue)) {
@@ -212,8 +242,8 @@ class routeros_api
             return array();
         }
     }
-	
-	
+
+
     /**
      * Change "-" and "/" from array key to "_"
      *
@@ -221,7 +251,7 @@ class routeros_api
      *
      * @return array                  Array with changed key names
      */
-    function array_change_key_name(&$array)
+    public function arrayChangeKeyName(&$array)
     {
         if (is_array($array)) {
             foreach ($array as $k => $v) {
@@ -238,8 +268,8 @@ class routeros_api
             return $array;
         }
     }
-	
-	
+
+
     /**
      * Read data from Router OS
      *
@@ -247,9 +277,9 @@ class routeros_api
      *
      * @return array                  Array with parsed or unparsed data
      */
-    function read($parse = true)
+    public function read($parse = true)
     {
-        $RESPONSE = array();
+        $RESPONSE     = array();
         $receiveddone = false;
         while (true) {
             // Read the first byte of input which gives us some or all of the length
@@ -284,6 +314,9 @@ class routeros_api
             } else {
                 $LENGTH = $BYTE;
             }
+
+            $_ = "";
+
             // If we have got more characters to read, read them in.
             if ($LENGTH > 0) {
                 $_      = "";
@@ -296,21 +329,30 @@ class routeros_api
                 $RESPONSE[] = $_;
                 $this->debug('>>> [' . $retlen . '/' . $LENGTH . '] bytes read.');
             }
+
             // If we get a !done, make a note of it.
-            if ($_ == "!done")
+            if ($_ == "!done") {
                 $receiveddone = true;
+            }
+
             $STATUS = socket_get_status($this->socket);
-            if ($LENGTH > 0)
+            if ($LENGTH > 0) {
                 $this->debug('>>> [' . $LENGTH . ', ' . $STATUS['unread_bytes'] . ']' . $_);
-            if ((!$this->connected && !$STATUS['unread_bytes']) || ($this->connected && !$STATUS['unread_bytes'] && $receiveddone))
+            }
+
+            if ((!$this->connected && !$STATUS['unread_bytes']) || ($this->connected && !$STATUS['unread_bytes'] && $receiveddone)) {
                 break;
+            }
         }
-        if ($parse)
-            $RESPONSE = $this->parse_response($RESPONSE);
+
+        if ($parse) {
+            $RESPONSE = $this->parseResponse($RESPONSE);
+        }
+
         return $RESPONSE;
     }
-	
-	
+
+
     /**
      * Write (send) data to Router OS
      *
@@ -322,26 +364,30 @@ class routeros_api
      *
      * @return boolean                Return false if no command especified
      */
-    function write($command, $param2 = true)
+    public function write($command, $param2 = true)
     {
         if ($command) {
             $data = explode("\n", $command);
             foreach ($data as $com) {
                 $com = trim($com);
-                fwrite($this->socket, $this->encode_length(strlen($com)) . $com);
+                fwrite($this->socket, $this->encodeLength(strlen($com)) . $com);
                 $this->debug('<<< [' . strlen($com) . '] ' . $com);
             }
+
             if (gettype($param2) == 'integer') {
-                fwrite($this->socket, $this->encode_length(strlen('.tag=' . $param2)) . '.tag=' . $param2 . chr(0));
+                fwrite($this->socket, $this->encodeLength(strlen('.tag=' . $param2)) . '.tag=' . $param2 . chr(0));
                 $this->debug('<<< [' . strlen('.tag=' . $param2) . '] .tag=' . $param2);
-            } else if (gettype($param2) == 'boolean')
+            } elseif (gettype($param2) == 'boolean') {
                 fwrite($this->socket, ($param2 ? chr(0) : ''));
+            }
+
             return true;
-        } else
+        } else {
             return false;
+        }
     }
-	
-	
+
+
     /**
      * Write (send) data to Router OS
      *
@@ -350,27 +396,314 @@ class routeros_api
      *
      * @return array                  Array with parsed
      */
-    function comm($com, $arr = array())
+    public function comm($com, $arr = array())
     {
         $count = count($arr);
         $this->write($com, !$arr);
         $i = 0;
-        foreach ($arr as $k => $v) {
-            switch ($k[0]) {
-                case "?":
-                    $el = "$k=$v";
-                    break;
-                case "~":
-                    $el = "$k~$v";
-                    break;
-                default:
-                    $el = "=$k=$v";
-                    break;
+        if ($this->isIterable($arr)) {
+            foreach ($arr as $k => $v) {
+                switch ($k[0]) {
+                    case "?":
+                        $el = "$k=$v";
+                        break;
+                    case "~":
+                        $el = "$k~$v";
+                        break;
+                    default:
+                        $el = "=$k=$v";
+                        break;
+                }
+
+                $last = ($i++ == $count - 1);
+                $this->write($el, $last);
             }
-            $last = ($i++ == $count - 1);
-            $this->write($el, $last);
         }
+
         return $this->read();
     }
+
+    /**
+     * Standard destructor
+     *
+     * @return void
+     */
+    public function __destruct()
+    {
+        $this->disconnect();
+    }
 }
+
+// encrypt decript
+
+function encrypt($string, $key=128) {
+	$result = '';
+	for($i=0, $k= strlen($string); $i<$k; $i++) {
+		$char = substr($string, $i, 1);
+		$keychar = substr($key, ($i % strlen($key))-1, 1);
+		$char = chr(ord($char)+ord($keychar));
+		$result .= $char;
+	}
+	return base64_encode($result);
+}
+function decrypt($string, $key=128) {
+	$result = '';
+	$string = base64_decode($string);
+	for($i=0, $k=strlen($string); $i< $k ; $i++) {
+		$char = substr($string, $i, 1);
+		$keychar = substr($key, ($i % strlen($key))-1, 1);
+		$char = chr(ord($char)-ord($keychar));
+		$result .= $char;
+	}
+	return $result;
+}
+
+// Reformat date time MikroTik
+// by Laksamadi Guko
+
+function formatInterval($dtm){
+$val_convert = $dtm;
+$new_format = str_replace("s", "", str_replace("m", "m ", str_replace("h", "h ", str_replace("d", "d ", str_replace("w", "w ", $val_convert)))));
+return $new_format;
+}
+
+function formatDTM($dtm){
+if(substr($dtm, 1,1) == "d" || substr($dtm, 2,1) == "d"){
+    $day = explode("d",$dtm)[0]."d";
+    $day = str_replace("d", "d ", str_replace("w", "w ", $day));
+    $dtm = explode("d",$dtm)[1];
+}elseif(substr($dtm, 1,1) == "w" && substr($dtm, 3,1) == "d" || substr($dtm, 2,1) == "w" && substr($dtm, 4,1) == "d"){
+    $day = explode("d",$dtm)[0]."d";
+    $day = str_replace("d", "d ", str_replace("w", "w ", $day));
+    $dtm = explode("d",$dtm)[1];
+}elseif (substr($dtm, 1,1) == "w" || substr($dtm, 2,1) == "w" ) {
+    $day = explode("w",$dtm)[0]."w";
+    $day = str_replace("d", "d ", str_replace("w", "w ", $day));
+    $dtm = explode("w",$dtm)[1];
+}
+
+// secs
+if(strlen($dtm) == "2" && substr($dtm, -1) == "s"){
+    $format = $day." 00:00:0".substr($dtm, 0,-1);
+}elseif(strlen($dtm) == "3" && substr($dtm, -1) == "s"){
+    $format = $day." 00:00:".substr($dtm, 0,-1);
+//minutes
+}elseif(strlen($dtm) == "2" && substr($dtm, -1) == "m"){
+    $format = $day." 00:0".substr($dtm, 0,-1).":00";
+}elseif(strlen($dtm) == "3" && substr($dtm, -1) == "m"){
+    $format = $day." 00:".substr($dtm, 0,-1).":00";
+//hours
+}elseif(strlen($dtm) == "2" && substr($dtm, -1) == "h"){
+    $format = $day." 0".substr($dtm, 0,-1).":00:00";
+}elseif(strlen($dtm) == "3" && substr($dtm, -1) == "h"){
+    $format = $day." ".substr($dtm, 0,-1).":00:00";
+ 
+//minutes -secs
+}elseif(strlen($dtm) == "4" && substr($dtm, -1) == "s" && substr($dtm,1,-2) == "m"){
+    $format = $day." "."00:0".substr($dtm, 0,1).":0".substr($dtm, 2,-1);
+}elseif(strlen($dtm) == "5" && substr($dtm, -1) == "s" && substr($dtm,1,-3) == "m"){
+    $format = $day." "."00:0".substr($dtm, 0,1).":".substr($dtm, 2,-1);
+}elseif(strlen($dtm) == "5" && substr($dtm, -1) == "s" && substr($dtm,2,-2) == "m"){
+    $format = $day." "."00:".substr($dtm, 0,2).":0".substr($dtm, 3,-1);
+}elseif(strlen($dtm) == "6" && substr($dtm, -1) == "s" && substr($dtm,2,-3) == "m"){
+    $format = $day." "."00:".substr($dtm, 0,2).":".substr($dtm, 3,-1);
+
+//hours -secs
+}elseif(strlen($dtm) == "4" && substr($dtm, -1) == "s" && substr($dtm,1,-2) == "h"){
+    $format = $day." 0".substr($dtm, 0,1).":00:0".substr($dtm, 2,-1);
+}elseif(strlen($dtm) == "5" && substr($dtm, -1) == "s" && substr($dtm,1,-3) == "h"){
+    $format = $day." 0".substr($dtm, 0,1).":00:".substr($dtm, 2,-1);
+}elseif(strlen($dtm) == "5" && substr($dtm, -1) == "s" && substr($dtm,2,-2) == "h"){
+    $format = $day." ".substr($dtm, 0,2).":00:0".substr($dtm, 3,-1);
+}elseif(strlen($dtm) == "6" && substr($dtm, -1) == "s" && substr($dtm,2,-3) == "h"){
+    $format = $day." ".substr($dtm, 0,2).":00:".substr($dtm, 3,-1);
+
+//hours -secs
+}elseif(strlen($dtm) == "4" && substr($dtm, -1) == "m" && substr($dtm,1,-2) == "h"){
+    $format = $day." 0".substr($dtm, 0,1).":0".substr($dtm, 2,-1).":00";
+}elseif(strlen($dtm) == "5" && substr($dtm, -1) == "m" && substr($dtm,1,-3) == "h"){
+    $format = $day." 0".substr($dtm, 0,1).":".substr($dtm, 2,-1).":00";
+}elseif(strlen($dtm) == "5" && substr($dtm, -1) == "m" && substr($dtm,2,-2) == "h"){
+    $format = $day." ".substr($dtm, 0,2).":0".substr($dtm, 3,-1).":00";
+}elseif(strlen($dtm) == "6" && substr($dtm, -1) == "m" && substr($dtm,2,-3) == "h"){
+    $format = $day." ".substr($dtm, 0,2).":".substr($dtm, 3,-1).":00";
+
+//hours minutes secs
+}elseif(strlen($dtm) == "6" && substr($dtm, -1) == "s" && substr($dtm,3,-2) == "m" && substr($dtm,1,-4) == "h"){
+    $format = $day." 0".substr($dtm, 0,1).":0".substr($dtm, 2,-3).":0".substr($dtm, 4,-1);
+}elseif(strlen($dtm) == "7" && substr($dtm, -1) == "s" && substr($dtm,3,-3) == "m" && substr($dtm,1,-5) == "h"){
+    $format = $day." 0".substr($dtm, 0,1).":0".substr($dtm, 2,-4).":".substr($dtm, 4,-1);
+}elseif(strlen($dtm) == "7" && substr($dtm, -1) == "s" && substr($dtm,4,-2) == "m" && substr($dtm,1,-5) == "h"){
+    $format = $day." 0".substr($dtm, 0,1).":".substr($dtm, 2,-3).":0".substr($dtm, 5,-1);
+}elseif(strlen($dtm) == "8" && substr($dtm, -1) == "s" && substr($dtm,4,-3) == "m" && substr($dtm,1,-6) == "h"){
+    $format = $day." 0".substr($dtm, 0,1).":".substr($dtm, 2,-4).":".substr($dtm, 5,-1);
+}elseif(strlen($dtm) == "7" && substr($dtm, -1) == "s" && substr($dtm,4,-2) == "m" && substr($dtm,2,-4) == "h"){
+    $format = $day." ".substr($dtm, 0,2).":0".substr($dtm, 3,-3).":0".substr($dtm, 5,-1);
+}elseif(strlen($dtm) == "8" && substr($dtm, -1) == "s" && substr($dtm,4,-3) == "m" && substr($dtm,2,-5) == "h"){
+    $format = $day." ".substr($dtm, 0,2).":0".substr($dtm, 3,-4).":".substr($dtm, 5,-1);
+}elseif(strlen($dtm) == "8" && substr($dtm, -1) == "s" && substr($dtm,5,-2) == "m" && substr($dtm,2,-5) == "h"){
+    $format = $day." ".substr($dtm, 0,2).":".substr($dtm, 3,-3).":0".substr($dtm, 6,-1);
+}elseif(strlen($dtm) == "9" && substr($dtm, -1) == "s" && substr($dtm,5,-3) == "m" && substr($dtm,2,-6) == "h"){
+    $format = $day." ".substr($dtm, 0,2).":".substr($dtm, 3,-4).":".substr($dtm, 6,-1);
+
+}else{
+    $format = $dtm;
+}
+return $format;
+}
+
+//=====================================================START====================//
+
+/*
+ *  Base Code   : BangAchil
+ *  Email       : kesumaerlangga@gmail.com
+ *  Telegram    : @bangachil
+ *
+ *  Name        : Mikrotik bot telegram - php
+ *  Function    : Mikortik api
+ *  Manufacture : November 2018
+ *  Last Edited : 26 Desember 2019
+ *
+ *  Please do not change this code
+ *  All damage caused by editing we will not be responsible please think carefully,
+ *
+ */
+
+//=====================================================START SCRIPT====================//
+
+function toBytes($i) {
+    $bytes = ($i * 1000000);
+    return $bytes;
+}
+function toMB($i) {
+    $bytes = ($i * 1);
+    return $bytes;
+}
+function Crusername($length) {
+    $chars = "1234567890abcdefghijkmnopqrstuvwxyz";
+    $i     = 1;
+    $user  = "";
+    while ($i <= $length) {
+        $user .= $chars{mt_rand(0, strlen($chars))};
+        $i++;
+    }
+    return $user;
+}
+function Crpas($length) {
+    $chars = "1234567890abcdefghijkmnopqrstuvwxyz";
+    $i     = 1;
+    $pass  = "";
+    while ($i <= $length) {
+        $pass .= $chars{mt_rand(0, strlen($chars))};
+        $i++;
+    }
+    return $pass;
+    
+    
+};
+//Update by BangAchil 2 april 2019
+
+function msubstr($str, $start = 0, $length, $charset = "utf-8", $suffix = true){
+	if (function_exists("mb_substr")) {
+		$i_str_len = mb_strlen($str);
+		$s_sub_str = mb_substr($str, $start, $length, $charset);
+		if ($length >= $i_str_len) {
+			return $s_sub_str;
+		} 
+		return $s_sub_str . '';
+	} elseif (function_exists('iconv_substr')) {
+		return iconv_substr($str, $start, $length, $charset);
+	} 
+	$re['utf-8'] = "/[\x01-\x7f]|[\xc2-\xdf][\x80-\xbf]|[\xe0-\xef][\x80-\xbf]{2}|[\xf0-\xff][\x80-\xbf]{3}/";
+	$re['gb2312'] = "/[\x01-\x7f]|[\xb0-\xf7][\xa0-\xfe]/";
+	$re['gbk'] = "/[\x01-\x7f]|[\x81-\xfe][\x40-\xfe]/";
+	$re['big5'] = "/[\x01-\x7f]|[\x81-\xfe]([\x40-\x7e]|\xa1-\xfe])/";
+	preg_match_all($re[$charset], $str, $match);
+	$slice = join("", array_slice($match[0], $start, $length));
+	if ($suffix) return $slice . "…";
+	return $slice;
+}
+
+function make_string($len = 4, $type='checkCode'){
+	$str = '';
+	switch ($type) {
+		case 1:
+			$chars = str_repeat('123456789', 3);
+			break;
+		case 2:
+			$chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+			break;
+		case 3:
+			$chars = 'abcdefghijklmnopqrstuvwxyz';
+			break;
+		case 4:
+			$chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+			break;
+		case 5:
+			$chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz123456789';
+			break;
+		case 6:
+			$chars = 'abcdefghijklmnopqrstuvwxyz123456789';
+			break;
+		case 7:
+			$chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ123456789';
+			break;	
+		default: 
+			$chars = '';
+			break;
+	}
+	if ($len > 10) { 
+		$chars = $type == 1 ? str_repeat($chars, $len) : str_repeat($chars, 5);
+	} 
+	if ($type != 4) {
+		$chars = str_shuffle($chars);
+		$str = substr($chars, 0, $len);
+	} else {
+	
+		for($i = 0; $i < $len; $i ++) {
+			$str .= msubstr($chars, floor(mt_rand(0, mb_strlen($chars, 'utf-8') - 1)), 1);
+		} 
+	} 
+	return $str;
+} 
+
+function show_string($type){
+	switch ($type) {
+		case 1:
+			$chars = ' <option value="1">1234</option>';
+			break;
+		case 2:
+			$chars = '<option value="2">ABCDE</option>';
+			break;
+		case 3:
+			$chars = ' <option value="3">abcd</option>';
+			break;
+		case 4:
+			$chars = '<option value="4">ABCDabcd</option>';
+			break;
+		case 5:
+			$chars = ' <option value="5">ABCDabcd1234</option>';
+			break;
+		case 6:
+			$chars = '<option value="6">abcd1234</option>';
+			break;
+		case 7:
+			$chars = ' <option value="7">ABCD1234</option>';
+			break;
+		default: 
+			$chars = ' <option value=""></option>';
+			break;
+	}
+	return $chars;
+}
+
+
+
+
+
+
+
+
+//=====================================================END SCRIPT====================//
+
 ?>
